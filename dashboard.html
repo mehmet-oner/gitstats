@@ -1,0 +1,509 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Git History Dashboard</title>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.3/dist/chart.umd.min.js"></script>
+  <style>
+    :root {
+      --bg: #09141f;
+      --panel: #102132;
+      --panel-soft: #132a40;
+      --text: #eaf2f8;
+      --muted: #9db3c7;
+      --accent: #ff7a18;
+      --accent-2: #00c2a8;
+      --danger: #ff4d6d;
+      --line: #1f3a52;
+      --shadow: 0 20px 45px rgba(0, 0, 0, 0.28);
+    }
+
+    * { box-sizing: border-box; }
+
+    html, body {
+      width: 100%;
+      max-width: 100%;
+      overflow-x: hidden;
+    }
+
+    body {
+      margin: 0;
+      color: var(--text);
+      background:
+        radial-gradient(circle at 85% 10%, rgba(0, 194, 168, 0.12), transparent 38%),
+        radial-gradient(circle at 12% 18%, rgba(255, 122, 24, 0.16), transparent 36%),
+        linear-gradient(140deg, #07101a 0%, #0b1a2a 50%, #09141f 100%);
+      font-family: "Space Grotesk", "Avenir Next", "Segoe UI", sans-serif;
+      min-height: 100vh;
+    }
+
+    .wrap {
+      width: 100%;
+      max-width: 1240px;
+      margin: 0 auto;
+      padding: 22px clamp(12px, 2vw, 24px) 30px;
+      display: grid;
+      gap: 16px;
+    }
+
+    .hero, .panel {
+      background: linear-gradient(160deg, rgba(19, 42, 64, 0.92), rgba(16, 33, 50, 0.92));
+      border: 1px solid var(--line);
+      border-radius: 18px;
+      box-shadow: var(--shadow);
+      padding: 18px;
+      animation: rise .55s ease both;
+      min-width: 0;
+      width: 100%;
+    }
+
+    .hero h1 {
+      margin: 0 0 6px;
+      font-size: clamp(1.4rem, 2.7vw, 2rem);
+      letter-spacing: .02em;
+    }
+
+    .hero p {
+      margin: 0;
+      color: var(--muted);
+    }
+
+    .controls {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+      gap: 12px;
+      align-items: end;
+    }
+
+    label {
+      display: grid;
+      gap: 6px;
+      color: var(--muted);
+      font-size: .88rem;
+      min-width: 0;
+      width: 100%;
+    }
+
+    select, button {
+      width: 100%;
+      max-width: 100%;
+      height: 40px;
+      border-radius: 10px;
+      border: 1px solid #33536e;
+      background: #0b1c2c;
+      color: var(--text);
+      padding: 0 10px;
+      font: inherit;
+      min-width: 0;
+    }
+
+    select {
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      overflow: hidden;
+    }
+
+    button {
+      background: linear-gradient(130deg, var(--accent), #ff9c4a);
+      border: none;
+      color: #09141f;
+      font-weight: 700;
+      cursor: pointer;
+    }
+
+    .file-label { width: 100%; }
+    .file-input { display: none; }
+    .file-picker {
+      height: 40px;
+      border-radius: 10px;
+      border: 1px solid #33536e;
+      background: #0b1c2c;
+      display: grid;
+      grid-template-columns: auto 1fr;
+      align-items: center;
+      gap: 8px;
+      padding: 4px 8px;
+      min-width: 0;
+    }
+    .file-btn {
+      height: 30px;
+      border: 0;
+      border-radius: 8px;
+      background: linear-gradient(130deg, #1a3348, #254966);
+      color: #d9e8f5;
+      padding: 0 10px;
+      font-weight: 600;
+      cursor: pointer;
+      white-space: nowrap;
+    }
+    .file-name {
+      color: var(--muted);
+      font-size: .86rem;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      min-width: 0;
+    }
+
+    .stats {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+      gap: 10px;
+    }
+
+    .stat {
+      background: rgba(9, 20, 31, 0.45);
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      padding: 12px;
+    }
+
+    .stat .k { color: var(--muted); font-size: .82rem; }
+    .stat .v { font-size: 1.45rem; font-weight: 700; margin-top: 2px; }
+
+    .grid {
+      display: grid;
+      grid-template-columns: 2fr 1fr;
+      gap: 16px;
+      align-items: stretch;
+      min-width: 0;
+    }
+
+    .chart-panel { min-width: 0; overflow: hidden; }
+    .chart { height: 340px; width: 100% !important; display: block; }
+    .chart.small { height: 300px; }
+
+    @media (max-width: 950px) {
+      .grid { grid-template-columns: 1fr; }
+      .chart.small { height: 320px; }
+    }
+
+    @media (max-width: 640px) {
+      .controls { grid-template-columns: 1fr; }
+      .hero, .panel { padding: 14px; border-radius: 14px; }
+      .chart { height: 280px; }
+      .chart.small { height: 260px; }
+      .wrap { padding-left: 10px; padding-right: 10px; }
+    }
+
+    @keyframes rise {
+      from { transform: translateY(10px); opacity: 0; }
+      to { transform: translateY(0); opacity: 1; }
+    }
+  </style>
+</head>
+<body>
+  <main class="wrap">
+    <section class="hero">
+      <h1>Git History Activity Dashboard</h1>
+      <p>Daily/weekly/monthly movement across repositories</p>
+    </section>
+
+    <section class="panel controls">
+      <label>Repository
+        <select id="repoSelect"></select>
+      </label>
+      <label>Metric
+        <select id="metricSelect">
+          <option value="modified_lines">Modified (Added + Removed)</option>
+          <option value="added_lines">Added</option>
+          <option value="removed_lines">Removed</option>
+          <option value="net_change_lines">Net Change</option>
+          <option value="approx_total_loc">Approx Total LOC</option>
+          <option value="commits">Commits</option>
+          <option value="moved_lines_approx">Moved (Approx)</option>
+        </select>
+      </label>
+      <label>Granularity
+        <select id="granularitySelect">
+          <option value="auto">Auto</option>
+          <option value="day">Day</option>
+          <option value="week">Week</option>
+          <option value="month">Month</option>
+        </select>
+      </label>
+      <label class="file-label">Load CSV
+        <input class="file-input" id="fileInput" type="file" accept=".csv,text/csv" />
+        <div class="file-picker">
+          <button class="file-btn" id="pickFileBtn" type="button">Upload CSV</button>
+          <span class="file-name" id="fileName">all_repos_daily_stats.csv</span>
+        </div>
+      </label>
+      <button id="resetZoom">Reset View</button>
+    </section>
+
+    <section class="panel stats" id="stats"></section>
+
+    <section class="grid">
+      <section class="panel chart-panel">
+        <canvas id="trendChart" class="chart"></canvas>
+      </section>
+      <section class="panel chart-panel">
+        <canvas id="repoChart" class="chart small"></canvas>
+      </section>
+    </section>
+
+  </main>
+
+  <script>
+    const state = {
+      rows: [],
+      trendChart: null,
+      repoChart: null,
+      view: { repo: "ALL", metric: "modified_lines", granularity: "auto" }
+    };
+
+    const numKeys = ["commits", "added_lines", "removed_lines", "modified_lines", "moved_lines_approx", "net_change_lines"];
+
+    const fmt = new Intl.NumberFormat("en-US");
+
+    function resetViewDefaults() {
+      state.view.repo = "ALL";
+      state.view.metric = "modified_lines";
+      state.view.granularity = "auto";
+      document.getElementById("repoSelect").value = "ALL";
+      document.getElementById("metricSelect").value = "modified_lines";
+      document.getElementById("granularitySelect").value = "auto";
+      renderCharts();
+    }
+
+    function parseCsv(text) {
+      const lines = text.trim().split(/\r?\n/).filter(Boolean);
+      if (lines.length < 2) return [];
+      const headers = lines[0].split(",").map(s => s.trim());
+      const idx = Object.fromEntries(headers.map((h, i) => [h, i]));
+      const need = ["repo", "date", ...numKeys];
+      const missing = need.filter(k => idx[k] === undefined);
+      if (missing.length) throw new Error("Missing columns: " + missing.join(", "));
+      return lines.slice(1).map(line => {
+        const parts = line.split(",");
+        const row = { repo: parts[idx.repo], date: parts[idx.date] };
+        for (const k of numKeys) row[k] = Number(parts[idx[k]] || 0);
+        return row;
+      });
+    }
+
+    function startOfWeek(dateStr) {
+      const d = new Date(dateStr + "T00:00:00");
+      const day = (d.getDay() + 6) % 7;
+      d.setDate(d.getDate() - day);
+      return d.toISOString().slice(0, 10);
+    }
+
+    function toMonth(dateStr) {
+      return dateStr.slice(0, 7) + "-01";
+    }
+
+    function aggregate(rows, granularity) {
+      const map = new Map();
+      for (const r of rows) {
+        let key = r.date;
+        if (granularity === "week") key = startOfWeek(r.date);
+        if (granularity === "month") key = toMonth(r.date);
+        if (!map.has(key)) map.set(key, { date: key, commits: 0, added_lines: 0, removed_lines: 0, modified_lines: 0, moved_lines_approx: 0, net_change_lines: 0 });
+        const acc = map.get(key);
+        for (const k of numKeys) acc[k] += r[k];
+      }
+      return [...map.values()].sort((a, b) => a.date.localeCompare(b.date));
+    }
+
+    function pickGranularity(rows, selected) {
+      if (selected !== "auto") return selected;
+      const dayCount = new Set(rows.map(r => r.date)).size;
+      if (dayCount > 1000) return "month";
+      if (dayCount > 320) return "week";
+      return "day";
+    }
+
+    function updateRepoOptions() {
+      const select = document.getElementById("repoSelect");
+      const repos = [...new Set(state.rows.map(r => r.repo))].sort();
+      select.innerHTML = `<option value="ALL">All Repos</option>` + repos.map(r => `<option value="${r}">${r.replace("https://github.com/", "")}</option>`).join("");
+      if (!["ALL", ...repos].includes(state.view.repo)) state.view.repo = "ALL";
+      select.value = state.view.repo;
+    }
+
+    function cumulativeApproxLoc(rows) {
+      let total = 0;
+      return rows.map(r => {
+        total += r.net_change_lines;
+        return total;
+      });
+    }
+
+    function renderStats(rows, approxLocEnd) {
+      const total = rows.reduce((a, r) => {
+        for (const k of numKeys) a[k] += r[k];
+        return a;
+      }, Object.fromEntries(numKeys.map(k => [k, 0])));
+
+      const cards = [
+        ["Commits", total.commits],
+        ["Added", total.added_lines],
+        ["Removed", total.removed_lines],
+        ["Modified", total.modified_lines],
+        ["Net", total.net_change_lines],
+        ["Approx LOC End", approxLocEnd],
+        ["Active Days", new Set(rows.map(r => r.date)).size]
+      ];
+
+      document.getElementById("stats").innerHTML = cards.map(([k, v]) =>
+        `<article class="stat"><div class="k">${k}</div><div class="v">${fmt.format(v)}</div></article>`
+      ).join("");
+    }
+
+    function renderCharts() {
+      const metric = state.view.metric;
+      const selectedRows = state.view.repo === "ALL" ? state.rows : state.rows.filter(r => r.repo === state.view.repo);
+      const granularity = pickGranularity(selectedRows, state.view.granularity);
+      const series = aggregate(selectedRows, granularity);
+      const approxLocSeries = cumulativeApproxLoc(series);
+      const approxLocEnd = approxLocSeries.length ? approxLocSeries[approxLocSeries.length - 1] : 0;
+      renderStats(series, approxLocEnd);
+      const primarySeries = metric === "approx_total_loc" ? approxLocSeries : series.map(r => r[metric]);
+      const trendDatasets = [
+        {
+          label: metric,
+          data: primarySeries,
+          borderColor: "#00c2a8",
+          backgroundColor: "rgba(0,194,168,0.16)",
+          fill: true,
+          borderWidth: 2,
+          pointRadius: 0,
+          tension: 0.25,
+          yAxisID: "y"
+        }
+      ];
+
+      if (metric !== "approx_total_loc") {
+        trendDatasets.push({
+          label: "approx_total_loc",
+          data: approxLocSeries,
+          borderColor: "#ffb15e",
+          backgroundColor: "rgba(255,177,94,0)",
+          fill: false,
+          borderWidth: 2,
+          borderDash: [6, 4],
+          pointRadius: 0,
+          tension: 0.2,
+          yAxisID: "y2"
+        });
+      }
+
+      const trendCfg = {
+        type: "line",
+        data: {
+          labels: series.map(r => r.date),
+          datasets: trendDatasets
+        },
+        options: {
+          responsive: true,
+          maintainAspectRatio: false,
+          animation: false,
+          plugins: { legend: { labels: { color: "#c5d7e6" } } },
+          scales: {
+            x: { ticks: { color: "#9db3c7", maxTicksLimit: 14 }, grid: { color: "rgba(70,99,124,.26)" } },
+            y: { ticks: { color: "#9db3c7", callback: v => fmt.format(v) }, grid: { color: "rgba(70,99,124,.26)" } }
+          }
+        }
+      };
+
+      if (metric !== "approx_total_loc") {
+        trendCfg.options.scales.y2 = {
+          position: "right",
+          ticks: { color: "#f7cb96", callback: v => fmt.format(v) },
+          grid: { drawOnChartArea: false }
+        };
+      }
+
+      if (state.trendChart) state.trendChart.destroy();
+      state.trendChart = new Chart(document.getElementById("trendChart"), trendCfg);
+
+      const byRepo = new Map();
+      for (const r of state.rows) {
+        if (!byRepo.has(r.repo)) byRepo.set(r.repo, 0);
+        if (metric === "approx_total_loc") {
+          byRepo.set(r.repo, byRepo.get(r.repo) + r.net_change_lines);
+        } else {
+          byRepo.set(r.repo, byRepo.get(r.repo) + r[metric]);
+        }
+      }
+      const repoPairs = [...byRepo.entries()].sort((a, b) => b[1] - a[1]).slice(0, 12);
+
+      const repoCfg = {
+        type: "bar",
+        data: {
+          labels: repoPairs.map(([r]) => r.replace("https://github.com/", "")),
+          datasets: [{
+            label: `Total ${metric}`,
+            data: repoPairs.map(([, v]) => v),
+            backgroundColor: "rgba(255,122,24,.85)",
+            borderRadius: 6
+          }]
+        },
+        options: {
+          indexAxis: "y",
+          responsive: true,
+          maintainAspectRatio: false,
+          animation: false,
+          plugins: { legend: { labels: { color: "#c5d7e6" } } },
+          scales: {
+            x: { ticks: { color: "#9db3c7", callback: v => fmt.format(v) }, grid: { color: "rgba(70,99,124,.26)" } },
+            y: { ticks: { color: "#c5d7e6" }, grid: { display: false } }
+          }
+        }
+      };
+
+      if (state.repoChart) state.repoChart.destroy();
+      state.repoChart = new Chart(document.getElementById("repoChart"), repoCfg);
+
+    }
+
+    function bindControls() {
+      const fileInput = document.getElementById("fileInput");
+      const fileName = document.getElementById("fileName");
+      const pickFileBtn = document.getElementById("pickFileBtn");
+
+      document.getElementById("repoSelect").addEventListener("change", e => { state.view.repo = e.target.value; renderCharts(); });
+      document.getElementById("metricSelect").addEventListener("change", e => { state.view.metric = e.target.value; renderCharts(); });
+      document.getElementById("granularitySelect").addEventListener("change", e => { state.view.granularity = e.target.value; renderCharts(); });
+      document.getElementById("resetZoom").addEventListener("click", resetViewDefaults);
+      pickFileBtn.addEventListener("click", () => fileInput.click());
+      fileInput.addEventListener("change", async e => {
+        const f = e.target.files?.[0];
+        if (!f) return;
+        fileName.textContent = f.name;
+        try {
+          state.rows = parseCsv(await f.text());
+          state.view.repo = "ALL";
+          updateRepoOptions();
+          renderCharts();
+        } catch (err) {
+          console.error("CSV parse error:", err);
+        }
+      });
+      window.addEventListener("resize", () => {
+        state.trendChart?.resize();
+        state.repoChart?.resize();
+      });
+    }
+
+    async function boot() {
+      bindControls();
+      try {
+        const res = await fetch("./all_repos_daily_stats.csv");
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        state.rows = parseCsv(await res.text());
+        document.getElementById("fileName").textContent = "all_repos_daily_stats.csv";
+        updateRepoOptions();
+        renderCharts();
+      } catch (_) {
+        console.warn("Could not auto-load all_repos_daily_stats.csv. Use the file picker.");
+      }
+    }
+
+    boot();
+  </script>
+</body>
+</html>

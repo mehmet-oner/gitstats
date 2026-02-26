@@ -1,0 +1,6 @@
+{
+  "repos": [
+    "https://github.com/microsoft/vscode.git",
+    "https://github.com/nodejs/node.git"
+  ]
+}

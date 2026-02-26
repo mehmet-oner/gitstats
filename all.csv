@@ -1,0 +1,17 @@
+repo,date,commits,added_lines,removed_lines,modified_lines,moved_lines_approx,net_change_lines
+https://github.com/microsoft/vscode.git,2026-02-19,53,5002,2661,7663,1811,2341
+https://github.com/microsoft/vscode.git,2026-02-20,183,25962,21857,47819,15883,4105
+https://github.com/microsoft/vscode.git,2026-02-21,39,2269,805,3074,528,1464
+https://github.com/microsoft/vscode.git,2026-02-22,28,4326,1138,5464,1105,3188
+https://github.com/microsoft/vscode.git,2026-02-23,168,16753,4650,21403,4090,12103
+https://github.com/microsoft/vscode.git,2026-02-24,170,16861,4753,21614,3680,12108
+https://github.com/microsoft/vscode.git,2026-02-25,202,9890,4674,14564,3300,5216
+https://github.com/microsoft/vscode.git,2026-02-26,125,6114,1525,7639,1369,4589
+https://github.com/nodejs/node.git,2026-02-19,2,132,11082,11214,0,-10950
+https://github.com/nodejs/node.git,2026-02-20,3,63,15,78,13,48
+https://github.com/nodejs/node.git,2026-02-21,3,267,103,370,103,164
+https://github.com/nodejs/node.git,2026-02-22,152,537537,46099,583636,26850,491438
+https://github.com/nodejs/node.git,2026-02-23,3,124,16,140,16,108
+https://github.com/nodejs/node.git,2026-02-24,301,297049,180057,477106,179561,116992
+https://github.com/nodejs/node.git,2026-02-25,7,62062,25962,88024,25962,36100
+https://github.com/nodejs/node.git,2026-02-26,5,1288,37,1325,34,1251
