@@ -19,3 +19,7 @@ Optional filters:
 --ext ts --ext java   # only these file extensions
 --since 30d           # history window: d=days, m=months, y=years (default is 7d)
 ```
+
+## Dashboard
+
+`dashboard.html` is a static viewer for the CSV output.
