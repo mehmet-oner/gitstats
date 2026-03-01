@@ -211,7 +211,7 @@
           <option value="removed_lines">Removed</option>
           <option value="net_change_lines">Net Change</option>
           <option value="approx_total_loc">Approx Total LOC</option>
-          <option value="commits">Commits</option>
+          <option value="commits" selected>Commits</option>
           <option value="moved_lines_approx">Moved (Approx)</option>
         </select>
       </label>
@@ -251,7 +251,7 @@
       rows: [],
       trendChart: null,
       repoChart: null,
-      view: { repo: "ALL", metric: "modified_lines", granularity: "auto" }
+      view: { repo: "ALL", metric: "commits", granularity: "auto" }
     };
 
     const numKeys = ["commits", "added_lines", "removed_lines", "modified_lines", "moved_lines_approx", "net_change_lines"];
@@ -260,10 +260,10 @@
 
     function resetViewDefaults() {
       state.view.repo = "ALL";
-      state.view.metric = "modified_lines";
+      state.view.metric = "commits";
       state.view.granularity = "auto";
       document.getElementById("repoSelect").value = "ALL";
-      document.getElementById("metricSelect").value = "modified_lines";
+      document.getElementById("metricSelect").value = "commits";
       document.getElementById("granularitySelect").value = "auto";
       renderCharts();
     }
@@ -360,6 +360,7 @@
       const series = aggregate(selectedRows, granularity);
       const approxLocSeries = cumulativeApproxLoc(series);
       const approxLocEnd = approxLocSeries.length ? approxLocSeries[approxLocSeries.length - 1] : 0;
+      const showApproxOverlay = metric !== "approx_total_loc" && approxLocSeries.some(v => v !== 0);
       renderStats(series, approxLocEnd);
       const primarySeries = metric === "approx_total_loc" ? approxLocSeries : series.map(r => r[metric]);
       const trendDatasets = [
@@ -371,12 +372,13 @@
           fill: true,
           borderWidth: 2,
           pointRadius: 0,
+          cubicInterpolationMode: "monotone",
           tension: 0.25,
           yAxisID: "y"
         }
       ];
 
-      if (metric !== "approx_total_loc") {
+      if (showApproxOverlay) {
         trendDatasets.push({
           label: "approx_total_loc",
           data: approxLocSeries,
@@ -386,6 +388,7 @@
           borderWidth: 2,
           borderDash: [6, 4],
           pointRadius: 0,
+          cubicInterpolationMode: "monotone",
           tension: 0.2,
           yAxisID: "y2"
         });
@@ -404,14 +407,19 @@
           plugins: { legend: { labels: { color: "#c5d7e6" } } },
           scales: {
             x: { ticks: { color: "#9db3c7", maxTicksLimit: 14 }, grid: { color: "rgba(70,99,124,.26)" } },
-            y: { ticks: { color: "#9db3c7", callback: v => fmt.format(v) }, grid: { color: "rgba(70,99,124,.26)" } }
+            y: {
+              min: primarySeries.every(v => v >= 0) ? 0 : undefined,
+              ticks: { color: "#9db3c7", callback: v => fmt.format(v) },
+              grid: { color: "rgba(70,99,124,.26)" }
+            }
           }
         }
       };
 
-      if (metric !== "approx_total_loc") {
+      if (showApproxOverlay) {
         trendCfg.options.scales.y2 = {
           position: "right",
+          min: approxLocSeries.every(v => v >= 0) ? 0 : undefined,
           ticks: { color: "#f7cb96", callback: v => fmt.format(v) },
           grid: { drawOnChartArea: false }
         };

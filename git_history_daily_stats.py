@@ -1,8 +1,11 @@
 #!/usr/bin/env python3
-"""Generate day-by-day git line-change stats with minimal clone/download cost.
+"""Generate day-by-day git history stats with minimal clone/download cost.
 
 For remote repositories, this script creates/updates a local *bare partial clone*
 (`--filter=blob:none`) and then scans history with one `git log --shortstat` pass.
+
+Use `--commits-only` to skip diff stats and count only commits per day. In that
+mode, the non-commit CSV columns are emitted as zeros for compatibility.
 
 Output columns:
 - date: YYYY-MM-DD (commit date)
@@ -432,27 +435,36 @@ def build_git_log_cmd(
     since: str | None = None,
     range_start: date | None = None,
     range_end_exclusive: date | None = None,
+    commits_only: bool = False,
 ) -> list[str]:
     cmd = [
         "git",
         "-c",
         "commitGraph.readChangedPaths=true",
-        "-c",
-        "diff.algorithm=myers",
-        "-c",
-        "diff.indentHeuristic=false",
+    ]
+    if not commits_only:
+        cmd.extend([
+            "-c",
+            "diff.algorithm=myers",
+            "-c",
+            "diff.indentHeuristic=false",
+        ])
+    cmd.extend([
         "-C",
         str(repo_path),
         "log",
         "--date=short",
         "--pretty=format:" + DATE_MARKER + "%cd",
-        "--shortstat",
-        "--no-color",
-        "--no-notes",
-        "--no-ext-diff",
-        "--no-textconv",
-        "--no-renames",
-    ]
+    ])
+    if not commits_only:
+        cmd.extend([
+            "--shortstat",
+            "--no-color",
+            "--no-notes",
+            "--no-ext-diff",
+            "--no-textconv",
+            "--no-renames",
+        ])
 
     if target_ref is None:
         cmd.append("--all")
@@ -508,6 +520,7 @@ def collect_daily_stats_time_sliced(
     exts: list[str] | None,
     since: str,
     intra_repo_jobs: int,
+    commits_only: bool = False,
     progress_label: str | None = None,
 ) -> Dict[str, dict]:
     windows = split_date_window(
@@ -517,7 +530,13 @@ def collect_daily_stats_time_sliced(
     )
     if len(windows) <= 1:
         return _collect_daily_stats_with_cmd(
-            build_git_log_cmd(repo_path, target_ref, exts=exts, since=since),
+            build_git_log_cmd(
+                repo_path,
+                target_ref,
+                exts=exts,
+                since=since,
+                commits_only=commits_only,
+            ),
             progress_label=progress_label,
         )
 
@@ -536,6 +555,7 @@ def collect_daily_stats_time_sliced(
                     exts=exts,
                     range_start=range_start,
                     range_end_exclusive=range_end,
+                    commits_only=commits_only,
                 ),
                 chunk_label,
             )
@@ -557,6 +577,7 @@ def collect_daily_stats_filtered(
     branch: str | None = None,
     all_branches: bool = False,
     intra_repo_jobs: int = 1,
+    commits_only: bool = False,
     progress_label: str | None = None,
 ) -> Dict[str, dict]:
     def run_collection(current_repo_path: Path, current_target_ref: str | None) -> Dict[str, dict]:
@@ -567,6 +588,7 @@ def collect_daily_stats_filtered(
                 exts,
                 since,
                 intra_repo_jobs,
+                commits_only=commits_only,
                 progress_label=progress_label,
             )
         return _collect_daily_stats_with_cmd(
@@ -575,6 +597,7 @@ def collect_daily_stats_filtered(
                 current_target_ref,
                 exts=exts,
                 since=since,
+                commits_only=commits_only,
             ),
             progress_label=progress_label,
         )
@@ -716,6 +739,7 @@ def build_rows_for_repo(
     branch: str | None,
     all_branches: bool,
     intra_repo_jobs: int,
+    commits_only: bool,
 ) -> tuple[int, list[dict], int]:
     print(f"[progress] [{index}/{total_repos}] preparing {repo}", file=sys.stderr, flush=True)
     repo_path, target_ref = prepare_repo(
@@ -735,6 +759,7 @@ def build_rows_for_repo(
         branch=branch,
         all_branches=all_branches,
         intra_repo_jobs=intra_repo_jobs,
+        commits_only=commits_only,
         progress_label=f"[{index}/{total_repos}] {repo}",
     )
 
@@ -798,6 +823,11 @@ def main() -> int:
         default=1,
         help="Number of time-sliced workers to use within a single repo scan (default: 1)",
     )
+    parser.add_argument(
+        "--commits-only",
+        action="store_true",
+        help="Count commits per day only and skip diff/line stats for much faster scans",
+    )
     args = parser.parse_args()
 
     if not args.repo and not args.repos_json:
@@ -839,6 +869,7 @@ def main() -> int:
                         args.branch,
                         args.all_branches,
                         args.intra_repo_jobs,
+                        args.commits_only,
                     ): (i, repo)
                     for i, repo in enumerate(repos, start=1)
                 }
@@ -874,6 +905,7 @@ def main() -> int:
             branch=args.branch,
             all_branches=args.all_branches,
             intra_repo_jobs=args.intra_repo_jobs,
+            commits_only=args.commits_only,
             progress_label=args.repo,
         )
         write_csv(daily_stats, Path(args.output).expanduser())
