@@ -19,6 +19,7 @@ an approximation that treats replaced/relocated lines within diffs as moved.
 from __future__ import annotations
 
 import argparse
+import calendar
 import csv
 import hashlib
 import json
@@ -29,6 +30,8 @@ import subprocess
 import sys
 import time
 from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import date, timedelta
 from pathlib import Path
 from typing import Dict
 
@@ -64,18 +67,75 @@ def run_git(
         raise RuntimeError(f"git {' '.join(args)} failed: {msg}") from e
 
 
-def parse_since_window(value: str) -> str:
+def parse_since_parts(value: str) -> tuple[int, str]:
     m = re.fullmatch(r"\s*(\d+)\s*([dmyDMy])\s*", value)
     if not m:
         raise RuntimeError("Invalid --since value. Use formats like 9d, 10m, 1y")
     qty = int(m.group(1))
     if qty <= 0:
         raise RuntimeError("--since quantity must be > 0")
-    unit = m.group(2).lower()
+    return qty, m.group(2).lower()
+
+
+def parse_since_window(value: str) -> str:
+    qty, unit = parse_since_parts(value)
     word = {"d": "day", "m": "month", "y": "year"}[unit]
     if qty != 1:
         word += "s"
     return f"{qty} {word} ago"
+
+
+def _shift_back_months(base: date, months: int) -> date:
+    month_index = (base.year * 12 + (base.month - 1)) - months
+    year = month_index // 12
+    month = (month_index % 12) + 1
+    day = min(base.day, calendar.monthrange(year, month)[1])
+    return date(year, month, day)
+
+
+def _shift_back_years(base: date, years: int) -> date:
+    year = base.year - years
+    day = min(base.day, calendar.monthrange(year, base.month)[1])
+    return date(year, base.month, day)
+
+
+def history_window_start_date(value: str) -> date:
+    qty, unit = parse_since_parts(value)
+    cutoff = date.today()
+
+    if unit == "d":
+        cutoff -= timedelta(days=qty)
+    elif unit == "m":
+        cutoff = _shift_back_months(cutoff, qty)
+    else:
+        cutoff = _shift_back_years(cutoff, qty)
+
+    return cutoff
+
+
+def shallow_fetch_since(value: str, pad_days: int = 30) -> str:
+    return (history_window_start_date(value) - timedelta(days=pad_days)).isoformat()
+
+
+def split_date_window(start: date, end_exclusive: date, slices: int) -> list[tuple[date, date]]:
+    total_days = (end_exclusive - start).days
+    if total_days <= 0:
+        return []
+    if slices <= 1:
+        return [(start, end_exclusive)]
+
+    actual_slices = min(slices, total_days)
+    base, remainder = divmod(total_days, actual_slices)
+    windows: list[tuple[date, date]] = []
+    cursor = start
+
+    for i in range(actual_slices):
+        span = base + (1 if i < remainder else 0)
+        next_cursor = cursor + timedelta(days=span)
+        windows.append((cursor, next_cursor))
+        cursor = next_cursor
+
+    return windows
 
 
 def repo_cache_path(repo: str, cache_dir: Path) -> Path:
@@ -89,50 +149,146 @@ def is_remote_repo(repo: str) -> bool:
     return repo.startswith(("http://", "https://", "ssh://", "git@"))
 
 
-def prepare_repo(repo: str, cache_dir: Path) -> Path:
+def normalize_branch_name(branch: str) -> str:
+    cleaned = branch.strip()
+    prefix = "refs/heads/"
+    if cleaned.startswith(prefix):
+        cleaned = cleaned[len(prefix):]
+    if not cleaned:
+        raise RuntimeError("Branch name cannot be empty")
+    return cleaned
+
+
+def detect_remote_default_branch(repo: str) -> str:
+    output = run_git(["ls-remote", "--symref", repo, "HEAD"]).stdout.splitlines()
+    for line in output:
+        if not line.startswith("ref: ") or not line.endswith("\tHEAD"):
+            continue
+        ref_name = line[5:].split("\t", 1)[0]
+        prefix = "refs/heads/"
+        if ref_name.startswith(prefix):
+            return ref_name[len(prefix):]
+    raise RuntimeError(f"Could not determine default branch for remote: {repo}")
+
+
+def detect_local_default_ref(repo_path: Path) -> str:
+    result = run_git(
+        ["-C", str(repo_path), "symbolic-ref", "--quiet", "--short", "HEAD"],
+        check=False,
+    )
+    ref_name = result.stdout.strip()
+    return ref_name or "HEAD"
+
+
+def is_shallow_repo(repo_path: Path) -> bool:
+    result = run_git(
+        ["-C", str(repo_path), "rev-parse", "--is-shallow-repository"],
+        check=False,
+    )
+    return result.returncode == 0 and result.stdout.strip() == "true"
+
+
+def build_remote_fetch_args(
+    repo_path: Path,
+    branch: str | None,
+    since: str | None,
+    include_shallow: bool = True,
+    refetch: bool = False,
+) -> list[str]:
+    args = [
+        "-C",
+        str(repo_path),
+        "fetch",
+    ]
+    if refetch:
+        args.append("--refetch")
+    args.extend([
+        "--progress",
+        "--filter=blob:none",
+    ])
+    if branch is None:
+        args.append("--prune")
+    args.extend([
+        "--prune-tags",
+        "--no-tags",
+    ])
+    if since and include_shallow:
+        args.append(f"--shallow-since={shallow_fetch_since(since)}")
+    args.append("origin")
+    if branch is None:
+        args.append("+refs/heads/*:refs/heads/*")
+    else:
+        args.append(f"+refs/heads/{branch}:refs/heads/{branch}")
+    return args
+
+
+def refresh_commit_graph(repo_path: Path) -> None:
+    run_git(
+        [
+            "-C",
+            str(repo_path),
+            "commit-graph",
+            "write",
+            "--reachable",
+            "--split",
+            "--changed-paths",
+        ]
+    )
+
+
+def prepare_repo(
+    repo: str,
+    cache_dir: Path,
+    since: str | None = None,
+    branch: str | None = None,
+    all_branches: bool = False,
+) -> tuple[Path, str | None]:
     if not is_remote_repo(repo):
         p = Path(repo).expanduser().resolve()
         if not (p / ".git").exists() and not (p / "objects").exists():
             raise RuntimeError(f"Not a git repository: {p}")
-        return p
+        if all_branches:
+            return p, None
+        if branch:
+            return p, normalize_branch_name(branch)
+        return p, detect_local_default_ref(p)
 
     cache_dir.mkdir(parents=True, exist_ok=True)
     target = repo_cache_path(repo, cache_dir)
+    selected_branch = None if all_branches else normalize_branch_name(branch) if branch else detect_remote_default_branch(repo)
+    target_existed = target.exists()
 
-    if not target.exists():
-        # Bare + blobless partial clone keeps history metadata without checkout.
+    if not target_existed:
         t0 = time.time()
-        print(f"[progress] cloning {repo} -> {target}", file=sys.stderr, flush=True)
-        run_git(
-            ["clone", "--progress", "--bare", "--filter=blob:none", "--no-tags", repo, str(target)],
-            capture_output=False,
-        )
-        print(f"[progress] clone finished in {time.time() - t0:.1f}s", file=sys.stderr, flush=True)
+        print(f"[progress] initializing cache for {repo} -> {target}", file=sys.stderr, flush=True)
+        run_git(["init", "--bare", str(target)], capture_output=False)
+        run_git(["-C", str(target), "remote", "add", "origin", repo])
+        run_git(["-C", str(target), "config", "remote.origin.promisor", "true"])
+        run_git(["-C", str(target), "config", "remote.origin.partialclonefilter", "blob:none"])
+        run_git(["-C", str(target), "config", "extensions.partialClone", "origin"])
+        print(f"[progress] cache initialized in {time.time() - t0:.1f}s", file=sys.stderr, flush=True)
     else:
         origin = run_git(["-C", str(target), "remote", "get-url", "origin"]).stdout.strip()
         if origin != repo:
             raise RuntimeError(f"Cache path collision: expected {repo}, found {origin}")
 
-    # Keep network and local updates minimal.
     t0 = time.time()
-    print(f"[progress] fetching updates for {repo}", file=sys.stderr, flush=True)
+    branch_label = selected_branch or "all branches"
+    print(f"[progress] fetching {branch_label} for {repo}", file=sys.stderr, flush=True)
     run_git(
-        [
-            "-C",
-            str(target),
-            "fetch",
-            "--progress",
-            "--filter=blob:none",
-            "--prune",
-            "--prune-tags",
-            "--no-tags",
-            "origin",
-            "+refs/heads/*:refs/heads/*",
-        ],
+        build_remote_fetch_args(
+            target,
+            selected_branch,
+            since,
+            include_shallow=(not target_existed) or is_shallow_repo(target),
+        ),
         capture_output=False,
     )
+    refresh_commit_graph(target)
     print(f"[progress] fetch finished in {time.time() - t0:.1f}s", file=sys.stderr, flush=True)
-    return target
+    if selected_branch is None:
+        return target, None
+    return target, f"refs/heads/{selected_branch}"
 
 
 def _collect_daily_stats_with_cmd(
@@ -234,47 +390,53 @@ def is_promisor_corruption_error(message: str) -> bool:
     )
 
 
-def repair_cached_repo(repo_path: Path) -> None:
+def repair_cached_repo(repo_path: Path, branch: str | None, since: str | None) -> None:
     print(f"[progress] attempting cache repair for {repo_path}", file=sys.stderr, flush=True)
     run_git(
-        [
-            "-C",
-            str(repo_path),
-            "fetch",
-            "--refetch",
-            "--progress",
-            "--filter=blob:none",
-            "--prune",
-            "--prune-tags",
-            "--no-tags",
-            "origin",
-            "+refs/heads/*:refs/heads/*",
-        ],
+        build_remote_fetch_args(
+            repo_path,
+            branch,
+            since,
+            include_shallow=is_shallow_repo(repo_path),
+            refetch=True,
+        ),
         capture_output=False,
     )
-    run_git(["-C", str(repo_path), "commit-graph", "write", "--reachable"])
+    refresh_commit_graph(repo_path)
 
 
-def rebuild_cached_repo(repo: str, cache_dir: Path) -> Path:
+def rebuild_cached_repo(
+    repo: str,
+    cache_dir: Path,
+    since: str | None,
+    branch: str | None,
+    all_branches: bool,
+) -> tuple[Path, str | None]:
     target = repo_cache_path(repo, cache_dir)
     if target.exists():
         print(f"[progress] removing corrupted cache {target}", file=sys.stderr, flush=True)
         shutil.rmtree(target, ignore_errors=True)
-    return prepare_repo(repo, cache_dir)
+    return prepare_repo(
+        repo,
+        cache_dir,
+        since=since,
+        branch=branch,
+        all_branches=all_branches,
+    )
 
 
-def collect_daily_stats_filtered(
-    repo: str,
+def build_git_log_cmd(
     repo_path: Path,
-    cache_dir: Path,
+    target_ref: str | None,
     exts: list[str] | None = None,
     since: str | None = None,
-    progress_label: str | None = None,
-) -> Dict[str, dict]:
+    range_start: date | None = None,
+    range_end_exclusive: date | None = None,
+) -> list[str]:
     cmd = [
         "git",
         "-c",
-        "core.commitGraph=false",
+        "commitGraph.readChangedPaths=true",
         "-c",
         "diff.algorithm=myers",
         "-c",
@@ -282,17 +444,25 @@ def collect_daily_stats_filtered(
         "-C",
         str(repo_path),
         "log",
-        "--all",
         "--date=short",
         "--pretty=format:" + DATE_MARKER + "%cd",
         "--shortstat",
         "--no-color",
+        "--no-notes",
         "--no-ext-diff",
         "--no-textconv",
         "--no-renames",
     ]
 
-    if since:
+    if target_ref is None:
+        cmd.append("--all")
+    else:
+        cmd.append(target_ref)
+
+    if range_start is not None and range_end_exclusive is not None:
+        cmd.append(f"--since={range_start.isoformat()} 00:00:00")
+        cmd.append(f"--before={range_end_exclusive.isoformat()} 00:00:00")
+    elif since:
         cmd.append(f"--since={parse_since_window(since)}")
 
     norm_exts: list[str] = []
@@ -306,36 +476,135 @@ def collect_daily_stats_filtered(
         cmd.append("--")
         cmd.extend([f":(glob)**/*.{ext}" for ext in sorted(set(norm_exts))])
 
-    try:
+    return cmd
+
+
+def merge_daily_stats(parts: list[Dict[str, dict]]) -> Dict[str, dict]:
+    merged = defaultdict(lambda: {
+        "commits": 0,
+        "added_lines": 0,
+        "removed_lines": 0,
+        "modified_lines": 0,
+        "moved_lines_approx": 0,
+        "net_change_lines": 0,
+    })
+
+    for part in parts:
+        for day, row in part.items():
+            merged_day = merged[day]
+            merged_day["commits"] += row["commits"]
+            merged_day["added_lines"] += row["added_lines"]
+            merged_day["removed_lines"] += row["removed_lines"]
+            merged_day["modified_lines"] += row["modified_lines"]
+            merged_day["moved_lines_approx"] += row["moved_lines_approx"]
+            merged_day["net_change_lines"] += row["net_change_lines"]
+
+    return dict(sorted(merged.items(), key=lambda kv: kv[0]))
+
+
+def collect_daily_stats_time_sliced(
+    repo_path: Path,
+    target_ref: str | None,
+    exts: list[str] | None,
+    since: str,
+    intra_repo_jobs: int,
+    progress_label: str | None = None,
+) -> Dict[str, dict]:
+    windows = split_date_window(
+        history_window_start_date(since),
+        date.today() + timedelta(days=1),
+        intra_repo_jobs,
+    )
+    if len(windows) <= 1:
         return _collect_daily_stats_with_cmd(
-            cmd,
+            build_git_log_cmd(repo_path, target_ref, exts=exts, since=since),
             progress_label=progress_label,
         )
+
+    results: list[Dict[str, dict]] = []
+    with ThreadPoolExecutor(max_workers=len(windows)) as executor:
+        future_map = {}
+        for index, (range_start, range_end) in enumerate(windows, start=1):
+            chunk_label = progress_label
+            if chunk_label:
+                chunk_label = f"{chunk_label} [slice {index}/{len(windows)}]"
+            future = executor.submit(
+                _collect_daily_stats_with_cmd,
+                build_git_log_cmd(
+                    repo_path,
+                    target_ref,
+                    exts=exts,
+                    range_start=range_start,
+                    range_end_exclusive=range_end,
+                ),
+                chunk_label,
+            )
+            future_map[future] = index
+
+        for future in as_completed(future_map):
+            results.append(future.result())
+
+    return merge_daily_stats(results)
+
+
+def collect_daily_stats_filtered(
+    repo: str,
+    repo_path: Path,
+    cache_dir: Path,
+    target_ref: str | None,
+    exts: list[str] | None = None,
+    since: str | None = None,
+    branch: str | None = None,
+    all_branches: bool = False,
+    intra_repo_jobs: int = 1,
+    progress_label: str | None = None,
+) -> Dict[str, dict]:
+    def run_collection(current_repo_path: Path, current_target_ref: str | None) -> Dict[str, dict]:
+        if since and intra_repo_jobs > 1:
+            return collect_daily_stats_time_sliced(
+                current_repo_path,
+                current_target_ref,
+                exts,
+                since,
+                intra_repo_jobs,
+                progress_label=progress_label,
+            )
+        return _collect_daily_stats_with_cmd(
+            build_git_log_cmd(
+                current_repo_path,
+                current_target_ref,
+                exts=exts,
+                since=since,
+            ),
+            progress_label=progress_label,
+        )
+
+    try:
+        return run_collection(repo_path, target_ref)
     except RuntimeError as e:
         if not is_promisor_corruption_error(str(e)):
             raise
-        repair_cached_repo(repo_path)
+        repair_branch = normalize_branch_name(target_ref) if target_ref else None
+        repair_cached_repo(repo_path, repair_branch, since)
         print(f"[progress] retrying git log after repair for {repo_path}", file=sys.stderr, flush=True)
         try:
-            return _collect_daily_stats_with_cmd(
-                cmd,
-                progress_label=progress_label,
-            )
+            return run_collection(repo_path, target_ref)
         except RuntimeError as e2:
             if not is_promisor_corruption_error(str(e2)) or not is_remote_repo(repo):
                 raise
-            rebuilt_repo_path = rebuild_cached_repo(repo, cache_dir)
-            c_index = cmd.index("-C")
-            cmd[c_index + 1] = str(rebuilt_repo_path)
+            rebuilt_repo_path, rebuilt_target_ref = rebuild_cached_repo(
+                repo,
+                cache_dir,
+                since,
+                branch,
+                all_branches,
+            )
             print(
                 f"[progress] retrying git log after full cache rebuild for {rebuilt_repo_path}",
                 file=sys.stderr,
                 flush=True,
             )
-            return _collect_daily_stats_with_cmd(
-                cmd,
-                progress_label=progress_label,
-            )
+            return run_collection(rebuilt_repo_path, rebuilt_target_ref)
 
 
 def write_csv(daily_stats: Dict[str, dict], output_csv: Path) -> None:
@@ -437,6 +706,54 @@ def load_repos_from_json(json_path: Path) -> list[str]:
     return cleaned
 
 
+def build_rows_for_repo(
+    index: int,
+    total_repos: int,
+    repo: str,
+    cache_dir: Path,
+    exts: list[str],
+    since: str,
+    branch: str | None,
+    all_branches: bool,
+    intra_repo_jobs: int,
+) -> tuple[int, list[dict], int]:
+    print(f"[progress] [{index}/{total_repos}] preparing {repo}", file=sys.stderr, flush=True)
+    repo_path, target_ref = prepare_repo(
+        repo,
+        cache_dir,
+        since=since,
+        branch=branch,
+        all_branches=all_branches,
+    )
+    daily_stats = collect_daily_stats_filtered(
+        repo,
+        repo_path,
+        cache_dir,
+        target_ref,
+        exts,
+        since,
+        branch=branch,
+        all_branches=all_branches,
+        intra_repo_jobs=intra_repo_jobs,
+        progress_label=f"[{index}/{total_repos}] {repo}",
+    )
+
+    rows_for_repo: list[dict] = []
+    for day, row in daily_stats.items():
+        rows_for_repo.append({
+            "repo": repo,
+            "date": day,
+            "commits": row["commits"],
+            "added_lines": row["added_lines"],
+            "removed_lines": row["removed_lines"],
+            "modified_lines": row["modified_lines"],
+            "moved_lines_approx": row["moved_lines_approx"],
+            "net_change_lines": row["net_change_lines"],
+        })
+    rows_for_repo.sort(key=lambda r: r["date"])
+    return index, rows_for_repo, len(daily_stats)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         description="Compute day-by-day line-change stats for one or many git repos without full checkout."
@@ -460,6 +777,27 @@ def main() -> int:
         default="7d",
         help="History window, e.g. 9d (days), 10m (months), 1y (years). Default: 7d",
     )
+    parser.add_argument(
+        "--branch",
+        help="Branch to scan for faster stats (default: remote HEAD or current local branch)",
+    )
+    parser.add_argument(
+        "--all-branches",
+        action="store_true",
+        help="Scan all branches instead of a single branch (slower)",
+    )
+    parser.add_argument(
+        "--jobs",
+        type=int,
+        default=max(1, min(4, os.cpu_count() or 1)),
+        help="Number of repos to process in parallel when using --repos-json (default: up to 4)",
+    )
+    parser.add_argument(
+        "--intra-repo-jobs",
+        type=int,
+        default=1,
+        help="Number of time-sliced workers to use within a single repo scan (default: 1)",
+    )
     args = parser.parse_args()
 
     if not args.repo and not args.repos_json:
@@ -468,6 +806,15 @@ def main() -> int:
     if args.repo and args.repos_json:
         print("Error: use either <repo> or --repos-json, not both", file=sys.stderr)
         return 1
+    if args.branch and args.all_branches:
+        print("Error: use either --branch or --all-branches, not both", file=sys.stderr)
+        return 1
+    if args.jobs <= 0:
+        print("Error: --jobs must be greater than 0", file=sys.stderr)
+        return 1
+    if args.intra_repo_jobs <= 0:
+        print("Error: --intra-repo-jobs must be greater than 0", file=sys.stderr)
+        return 1
 
     try:
         cache_dir = Path(args.cache_dir).expanduser()
@@ -475,51 +822,58 @@ def main() -> int:
         if args.repos_json:
             repos = load_repos_from_json(Path(args.repos_json).expanduser())
             combined_output = Path(args.output).expanduser()
-            combined_output.parent.mkdir(parents=True, exist_ok=True)
-            if combined_output.exists():
-                combined_output.unlink()
-            append_combined_rows([], combined_output, write_header=True)
+            workers = min(args.jobs, len(repos))
+            completed_rows: list[tuple[int, list[dict]]] = []
             total_rows = 0
 
-            for i, repo in enumerate(repos, start=1):
-                print(f"[progress] [{i}/{len(repos)}] preparing {repo}", file=sys.stderr, flush=True)
-                repo_path = prepare_repo(repo, cache_dir)
-                daily_stats = collect_daily_stats_filtered(
-                    repo,
-                    repo_path,
-                    cache_dir,
-                    args.ext,
-                    args.since,
-                    progress_label=f"[{i}/{len(repos)}] {repo}",
-                )
-                print(f"[{i}/{len(repos)}] {repo} processed ({len(daily_stats)} day rows)")
+            with ThreadPoolExecutor(max_workers=workers) as executor:
+                future_map = {
+                    executor.submit(
+                        build_rows_for_repo,
+                        i,
+                        len(repos),
+                        repo,
+                        cache_dir,
+                        args.ext,
+                        args.since,
+                        args.branch,
+                        args.all_branches,
+                        args.intra_repo_jobs,
+                    ): (i, repo)
+                    for i, repo in enumerate(repos, start=1)
+                }
 
-                rows_for_repo: list[dict] = []
-                for date, row in daily_stats.items():
-                    rows_for_repo.append({
-                        "repo": repo,
-                        "date": date,
-                        "commits": row["commits"],
-                        "added_lines": row["added_lines"],
-                        "removed_lines": row["removed_lines"],
-                        "modified_lines": row["modified_lines"],
-                        "moved_lines_approx": row["moved_lines_approx"],
-                        "net_change_lines": row["net_change_lines"],
-                    })
-                rows_for_repo.sort(key=lambda r: r["date"])
-                append_combined_rows(rows_for_repo, combined_output, write_header=False)
-                total_rows += len(rows_for_repo)
+                for future in as_completed(future_map):
+                    i, repo = future_map[future]
+                    index, rows_for_repo, day_count = future.result()
+                    print(f"[{i}/{len(repos)}] {repo} processed ({day_count} day rows)")
+                    completed_rows.append((index, rows_for_repo))
+                    total_rows += len(rows_for_repo)
 
+            combined_rows: list[dict] = []
+            for _, rows_for_repo in sorted(completed_rows, key=lambda item: item[0]):
+                combined_rows.extend(rows_for_repo)
+            write_combined_csv(combined_rows, combined_output)
             print(f"Wrote combined CSV with {total_rows} rows to {combined_output}")
             return 0
 
-        repo_path = prepare_repo(args.repo, cache_dir)
+        repo_path, target_ref = prepare_repo(
+            args.repo,
+            cache_dir,
+            since=args.since,
+            branch=args.branch,
+            all_branches=args.all_branches,
+        )
         daily_stats = collect_daily_stats_filtered(
             args.repo,
             repo_path,
             cache_dir,
+            target_ref,
             args.ext,
             args.since,
+            branch=args.branch,
+            all_branches=args.all_branches,
+            intra_repo_jobs=args.intra_repo_jobs,
             progress_label=args.repo,
         )
         write_csv(daily_stats, Path(args.output).expanduser())
