@@ -257,6 +257,55 @@
     const numKeys = ["commits", "added_lines", "removed_lines", "modified_lines", "moved_lines_approx", "net_change_lines"];
 
     const fmt = new Intl.NumberFormat("en-US");
+    const dayFmt = new Intl.DateTimeFormat("en-US", { month: "short", day: "numeric", year: "numeric" });
+    const monthFmt = new Intl.DateTimeFormat("en-US", { month: "short", year: "numeric" });
+    const metricLabels = {
+      commits: "Commits",
+      added_lines: "Added Lines",
+      removed_lines: "Removed Lines",
+      modified_lines: "Modified Lines",
+      moved_lines_approx: "Moved Lines (Approx)",
+      net_change_lines: "Net Change",
+      approx_total_loc: "Approx Total LOC"
+    };
+
+    function metricLabel(metric) {
+      return metricLabels[metric] || metric;
+    }
+
+    function formatBucketLabel(dateStr, granularity) {
+      if (!granularity) return dateStr;
+      const date = new Date(dateStr + "T00:00:00");
+      if (Number.isNaN(date.getTime())) return dateStr;
+      if (granularity === "month") return monthFmt.format(date);
+      if (granularity === "week") return `Week of ${dayFmt.format(date)}`;
+      return dayFmt.format(date);
+    }
+
+    function buildTooltipOptions({ granularity = null, valueAxis = "y", titleFormatter = null } = {}) {
+      return {
+        backgroundColor: "rgba(7, 16, 26, 0.96)",
+        borderColor: "#33536e",
+        borderWidth: 1,
+        cornerRadius: 12,
+        padding: 12,
+        titleColor: "#eaf2f8",
+        bodyColor: "#c5d7e6",
+        displayColors: true,
+        usePointStyle: true,
+        caretPadding: 10,
+        callbacks: {
+          title(items) {
+            if (!items.length) return "";
+            return titleFormatter ? titleFormatter(items[0]) : formatBucketLabel(items[0].label, granularity);
+          },
+          label(context) {
+            const parsed = typeof context.parsed === "number" ? context.parsed : context.parsed?.[valueAxis];
+            return `${context.dataset.label}: ${fmt.format(parsed ?? 0)}`;
+          }
+        }
+      };
+    }
 
     function resetViewDefaults() {
       state.view.repo = "ALL";
@@ -365,13 +414,18 @@
       const primarySeries = metric === "approx_total_loc" ? approxLocSeries : series.map(r => r[metric]);
       const trendDatasets = [
         {
-          label: metric,
+          label: metricLabel(metric),
           data: primarySeries,
           borderColor: "#00c2a8",
           backgroundColor: "rgba(0,194,168,0.16)",
           fill: true,
           borderWidth: 2,
           pointRadius: 0,
+          pointHoverRadius: 6,
+          pointHitRadius: 18,
+          pointHoverBorderWidth: 3,
+          pointHoverBackgroundColor: "#09141f",
+          pointHoverBorderColor: "#00c2a8",
           cubicInterpolationMode: "monotone",
           tension: 0.25,
           yAxisID: "y"
@@ -380,7 +434,7 @@
 
       if (showApproxOverlay) {
         trendDatasets.push({
-          label: "approx_total_loc",
+          label: metricLabel("approx_total_loc"),
           data: approxLocSeries,
           borderColor: "#ffb15e",
           backgroundColor: "rgba(255,177,94,0)",
@@ -388,6 +442,11 @@
           borderWidth: 2,
           borderDash: [6, 4],
           pointRadius: 0,
+          pointHoverRadius: 6,
+          pointHitRadius: 18,
+          pointHoverBorderWidth: 3,
+          pointHoverBackgroundColor: "#09141f",
+          pointHoverBorderColor: "#ffb15e",
           cubicInterpolationMode: "monotone",
           tension: 0.2,
           yAxisID: "y2"
@@ -404,7 +463,19 @@
           responsive: true,
           maintainAspectRatio: false,
           animation: false,
-          plugins: { legend: { labels: { color: "#c5d7e6" } } },
+          interaction: {
+            mode: "index",
+            intersect: false
+          },
+          plugins: {
+            legend: {
+              labels: {
+                color: "#c5d7e6",
+                usePointStyle: true
+              }
+            },
+            tooltip: buildTooltipOptions({ granularity })
+          },
           scales: {
             x: { ticks: { color: "#9db3c7", maxTicksLimit: 14 }, grid: { color: "rgba(70,99,124,.26)" } },
             y: {
@@ -444,10 +515,12 @@
         data: {
           labels: repoPairs.map(([r]) => r.replace("https://github.com/", "")),
           datasets: [{
-            label: `Total ${metric}`,
+            label: `Total ${metricLabel(metric)}`,
             data: repoPairs.map(([, v]) => v),
             backgroundColor: "rgba(255,122,24,.85)",
-            borderRadius: 6
+            borderRadius: 6,
+            hoverBackgroundColor: "#ff9c4a",
+            borderSkipped: false
           }]
         },
         options: {
@@ -455,7 +528,22 @@
           responsive: true,
           maintainAspectRatio: false,
           animation: false,
-          plugins: { legend: { labels: { color: "#c5d7e6" } } },
+          interaction: {
+            mode: "nearest",
+            intersect: false
+          },
+          plugins: {
+            legend: {
+              labels: {
+                color: "#c5d7e6",
+                usePointStyle: true
+              }
+            },
+            tooltip: buildTooltipOptions({
+              valueAxis: "x",
+              titleFormatter: item => item.label
+            })
+          },
           scales: {
             x: { ticks: { color: "#9db3c7", callback: v => fmt.format(v) }, grid: { color: "rgba(70,99,124,.26)" } },
             y: { ticks: { color: "#c5d7e6" }, grid: { display: false } }
