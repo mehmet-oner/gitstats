@@ -40,9 +40,9 @@
 
     .wrap {
       width: 100%;
-      max-width: 1240px;
-      margin: 0 auto;
-      padding: 22px clamp(12px, 2vw, 24px) 30px;
+      max-width: none;
+      margin: 0;
+      padding: 22px clamp(10px, 1.2vw, 18px) 30px;
       display: grid;
       gap: 16px;
     }
@@ -170,21 +170,75 @@
       min-width: 0;
     }
 
-    .chart-panel { min-width: 0; overflow: hidden; }
-    .chart { height: 340px; width: 100% !important; display: block; }
-    .chart.small { height: 300px; }
+    .chart-panel {
+      min-width: 0;
+      overflow: hidden;
+      display: grid;
+      gap: 10px;
+      align-content: start;
+    }
+    .chart-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      min-width: 0;
+    }
+    .chart-wrap {
+      position: relative;
+      width: 100%;
+      height: 340px;
+      min-width: 0;
+    }
+    .chart {
+      width: 100% !important;
+      height: 100% !important;
+      max-width: 100%;
+      min-width: 0;
+      display: block;
+    }
+    .chart.zoomable { cursor: crosshair; }
+    .chart-wrap.small { height: 300px; }
+    .chart-hint {
+      flex: 1 1 auto;
+      color: var(--muted);
+      font-size: .84rem;
+      min-height: 1.2em;
+      min-width: 0;
+    }
+    .icon-btn {
+      width: 40px;
+      height: 40px;
+      min-width: 40px;
+      padding: 0;
+      display: inline-grid;
+      place-items: center;
+      border: 1px solid #33536e;
+      background: #0b1c2c;
+      color: var(--text);
+      flex: 0 0 auto;
+    }
+    .icon-btn svg {
+      width: 18px;
+      height: 18px;
+      display: block;
+    }
+    .icon-btn:disabled {
+      opacity: 0.45;
+      cursor: default;
+    }
 
     @media (max-width: 950px) {
       .grid { grid-template-columns: 1fr; }
-      .chart.small { height: 320px; }
+      .chart-wrap.small { height: 320px; }
     }
 
     @media (max-width: 640px) {
       .controls { grid-template-columns: 1fr; }
       .hero, .panel { padding: 14px; border-radius: 14px; }
-      .chart { height: 280px; }
-      .chart.small { height: 260px; }
-      .wrap { padding-left: 10px; padding-right: 10px; }
+      .chart-wrap { height: 280px; }
+      .chart-wrap.small { height: 260px; }
+      .wrap { padding-left: 8px; padding-right: 8px; }
     }
 
     @keyframes rise {
@@ -230,17 +284,29 @@
           <span class="file-name" id="fileName">all_repos_daily_stats.csv</span>
         </div>
       </label>
-      <button id="resetZoom">Reset View</button>
     </section>
 
     <section class="panel stats" id="stats"></section>
 
     <section class="grid">
       <section class="panel chart-panel">
-        <canvas id="trendChart" class="chart"></canvas>
+        <div class="chart-head">
+          <div class="chart-hint" id="rangeHint"></div>
+          <button class="icon-btn" id="resetZoom" type="button" aria-label="Reset time range" title="Reset time range">
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M12 5a7 7 0 1 1-6.3 4" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"></path>
+              <path d="M5 5v4h4" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"></path>
+            </svg>
+          </button>
+        </div>
+        <div class="chart-wrap">
+          <canvas id="trendChart" class="chart zoomable"></canvas>
+        </div>
       </section>
       <section class="panel chart-panel">
-        <canvas id="repoChart" class="chart small"></canvas>
+        <div class="chart-wrap small">
+          <canvas id="repoChart" class="chart"></canvas>
+        </div>
       </section>
     </section>
 
@@ -251,7 +317,8 @@
       rows: [],
       trendChart: null,
       repoChart: null,
-      view: { repo: "ALL", metric: "commits", granularity: "auto" }
+      view: { repo: "ALL", metric: "commits", granularity: "auto", zoomRange: null },
+      dragSelection: { active: false, startX: 0, currentX: 0 }
     };
 
     const numKeys = ["commits", "added_lines", "removed_lines", "modified_lines", "moved_lines_approx", "net_change_lines"];
@@ -307,14 +374,72 @@
       };
     }
 
-    function resetViewDefaults() {
-      state.view.repo = "ALL";
-      state.view.metric = "commits";
-      state.view.granularity = "auto";
-      document.getElementById("repoSelect").value = "ALL";
-      document.getElementById("metricSelect").value = "commits";
-      document.getElementById("granularitySelect").value = "auto";
-      renderCharts();
+    function bucketKey(dateStr, granularity) {
+      if (granularity === "week") return startOfWeek(dateStr);
+      if (granularity === "month") return toMonth(dateStr);
+      return dateStr;
+    }
+
+    function clearDragSelection(chart = state.trendChart) {
+      if (!state.dragSelection.active && state.dragSelection.startX === 0 && state.dragSelection.currentX === 0) return;
+      state.dragSelection.active = false;
+      state.dragSelection.startX = 0;
+      state.dragSelection.currentX = 0;
+      chart?.draw();
+    }
+
+    function clearZoomRange(render = true) {
+      if (!state.view.zoomRange) return;
+      state.view.zoomRange = null;
+      if (render) renderCharts();
+    }
+
+    function updateRangeHint(granularity, series) {
+      const hint = document.getElementById("rangeHint");
+      const resetBtn = document.getElementById("resetZoom");
+      if (!hint) return;
+      if (resetBtn) resetBtn.disabled = !state.view.zoomRange;
+      if (!series.length) {
+        hint.textContent = "Load data to explore the timeline.";
+        return;
+      }
+      if (!state.view.zoomRange) {
+        hint.textContent = "Drag on the trend chart to zoom. Double-click the chart to return to the full range.";
+        return;
+      }
+      const start = formatBucketLabel(state.view.zoomRange.start, granularity);
+      const end = formatBucketLabel(state.view.zoomRange.end, granularity);
+      hint.textContent = `Zoomed to ${start} to ${end}. Double-click the chart to reset the range.`;
+    }
+
+    const trendSelectionPlugin = {
+      id: "trendSelection",
+      afterDatasetsDraw(chart) {
+        if (chart.canvas.id !== "trendChart" || !state.dragSelection.active) return;
+        const { left, right, top, bottom } = chart.chartArea || {};
+        if (left === undefined) return;
+        const startX = Math.max(left, Math.min(right, state.dragSelection.startX));
+        const currentX = Math.max(left, Math.min(right, state.dragSelection.currentX));
+        const x = Math.min(startX, currentX);
+        const width = Math.abs(currentX - startX);
+        if (width < 2) return;
+
+        const ctx = chart.ctx;
+        ctx.save();
+        ctx.fillStyle = "rgba(0, 194, 168, 0.16)";
+        ctx.strokeStyle = "rgba(0, 194, 168, 0.75)";
+        ctx.lineWidth = 1;
+        ctx.fillRect(x, top, width, bottom - top);
+        ctx.strokeRect(x, top, width, bottom - top);
+        ctx.restore();
+      }
+    };
+
+    Chart.register(trendSelectionPlugin);
+
+    function resetTimeRange() {
+      clearDragSelection();
+      clearZoomRange();
     }
 
     function parseCsv(text) {
@@ -381,6 +506,86 @@
       });
     }
 
+    function bindTrendZoom(chart, labels) {
+      const canvas = chart.canvas;
+      if (!canvas) return;
+
+      canvas.style.touchAction = "none";
+
+      const chartAreaContains = (clientX, clientY) => {
+        const rect = canvas.getBoundingClientRect();
+        const x = clientX - rect.left;
+        const y = clientY - rect.top;
+        const area = chart.chartArea;
+        return area && x >= area.left && x <= area.right && y >= area.top && y <= area.bottom;
+      };
+
+      const relativeX = clientX => {
+        const rect = canvas.getBoundingClientRect();
+        return clientX - rect.left;
+      };
+
+      const indexFromPixel = pixel => {
+        const scale = chart.scales.x;
+        if (!scale || !labels.length) return -1;
+        const rawIndex = scale.getValueForPixel(pixel);
+        const clamped = Math.round(rawIndex);
+        return Math.max(0, Math.min(labels.length - 1, clamped));
+      };
+
+      const finishSelection = event => {
+        if (!state.dragSelection.active) return;
+        const endX = relativeX(event.clientX);
+        const startX = state.dragSelection.startX;
+        const width = Math.abs(endX - startX);
+        const left = chart.chartArea.left;
+        const right = chart.chartArea.right;
+        const startPixel = Math.max(left, Math.min(right, startX));
+        const endPixel = Math.max(left, Math.min(right, endX));
+
+        clearDragSelection(chart);
+
+        if (width < 10 || labels.length < 2) return;
+
+        const startIdx = indexFromPixel(Math.min(startPixel, endPixel));
+        const endIdx = indexFromPixel(Math.max(startPixel, endPixel));
+        if (startIdx < 0 || endIdx < 0 || startIdx === endIdx) return;
+
+        state.view.zoomRange = {
+          start: labels[Math.min(startIdx, endIdx)],
+          end: labels[Math.max(startIdx, endIdx)]
+        };
+        renderCharts();
+      };
+
+      canvas.onpointerdown = event => {
+        if (event.button !== 0 || !chartAreaContains(event.clientX, event.clientY)) return;
+        state.dragSelection.active = true;
+        state.dragSelection.startX = relativeX(event.clientX);
+        state.dragSelection.currentX = state.dragSelection.startX;
+        canvas.setPointerCapture?.(event.pointerId);
+        chart.draw();
+      };
+
+      canvas.onpointermove = event => {
+        if (!state.dragSelection.active) return;
+        state.dragSelection.currentX = relativeX(event.clientX);
+        chart.draw();
+      };
+
+      canvas.onpointerup = event => {
+        canvas.releasePointerCapture?.(event.pointerId);
+        finishSelection(event);
+      };
+
+      canvas.onpointercancel = event => {
+        canvas.releasePointerCapture?.(event.pointerId);
+        clearDragSelection(chart);
+      };
+
+      canvas.ondblclick = () => clearZoomRange();
+    }
+
     function renderStats(rows, approxLocEnd) {
       const total = rows.reduce((a, r) => {
         for (const k of numKeys) a[k] += r[k];
@@ -406,10 +611,28 @@
       const metric = state.view.metric;
       const selectedRows = state.view.repo === "ALL" ? state.rows : state.rows.filter(r => r.repo === state.view.repo);
       const granularity = pickGranularity(selectedRows, state.view.granularity);
-      const series = aggregate(selectedRows, granularity);
-      const approxLocSeries = cumulativeApproxLoc(series);
+      const allSeries = aggregate(selectedRows, granularity);
+      let visibleIndices = allSeries.map((_, index) => index);
+
+      if (state.view.zoomRange) {
+        const zoomed = allSeries
+          .map((row, index) => ({ row, index }))
+          .filter(({ row }) => row.date >= state.view.zoomRange.start && row.date <= state.view.zoomRange.end)
+          .map(({ index }) => index);
+
+        if (zoomed.length >= 2) {
+          visibleIndices = zoomed;
+        } else {
+          state.view.zoomRange = null;
+        }
+      }
+
+      const fullApproxLocSeries = cumulativeApproxLoc(allSeries);
+      const series = visibleIndices.map(index => allSeries[index]);
+      const approxLocSeries = visibleIndices.map(index => fullApproxLocSeries[index]);
       const approxLocEnd = approxLocSeries.length ? approxLocSeries[approxLocSeries.length - 1] : 0;
       const showApproxOverlay = metric !== "approx_total_loc" && approxLocSeries.some(v => v !== 0);
+      updateRangeHint(granularity, series);
       renderStats(series, approxLocEnd);
       const primarySeries = metric === "approx_total_loc" ? approxLocSeries : series.map(r => r[metric]);
       const trendDatasets = [
@@ -498,9 +721,17 @@
 
       if (state.trendChart) state.trendChart.destroy();
       state.trendChart = new Chart(document.getElementById("trendChart"), trendCfg);
+      bindTrendZoom(state.trendChart, series.map(r => r.date));
 
       const byRepo = new Map();
-      for (const r of state.rows) {
+      const repoRows = state.view.zoomRange
+        ? state.rows.filter(r => {
+            const key = bucketKey(r.date, granularity);
+            return key >= state.view.zoomRange.start && key <= state.view.zoomRange.end;
+          })
+        : state.rows;
+
+      for (const r of repoRows) {
         if (!byRepo.has(r.repo)) byRepo.set(r.repo, 0);
         if (metric === "approx_total_loc") {
           byRepo.set(r.repo, byRepo.get(r.repo) + r.net_change_lines);
@@ -563,8 +794,12 @@
 
       document.getElementById("repoSelect").addEventListener("change", e => { state.view.repo = e.target.value; renderCharts(); });
       document.getElementById("metricSelect").addEventListener("change", e => { state.view.metric = e.target.value; renderCharts(); });
-      document.getElementById("granularitySelect").addEventListener("change", e => { state.view.granularity = e.target.value; renderCharts(); });
-      document.getElementById("resetZoom").addEventListener("click", resetViewDefaults);
+      document.getElementById("granularitySelect").addEventListener("change", e => {
+        state.view.granularity = e.target.value;
+        state.view.zoomRange = null;
+        renderCharts();
+      });
+      document.getElementById("resetZoom").addEventListener("click", resetTimeRange);
       pickFileBtn.addEventListener("click", () => fileInput.click());
       fileInput.addEventListener("change", async e => {
         const f = e.target.files?.[0];
@@ -573,15 +808,12 @@
         try {
           state.rows = parseCsv(await f.text());
           state.view.repo = "ALL";
+          state.view.zoomRange = null;
           updateRepoOptions();
           renderCharts();
         } catch (err) {
           console.error("CSV parse error:", err);
         }
-      });
-      window.addEventListener("resize", () => {
-        state.trendChart?.resize();
-        state.repoChart?.resize();
       });
     }
 
@@ -591,6 +823,7 @@
         const res = await fetch("./all_repos_daily_stats.csv");
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         state.rows = parseCsv(await res.text());
+        state.view.zoomRange = null;
         document.getElementById("fileName").textContent = "all_repos_daily_stats.csv";
         updateRepoOptions();
         renderCharts();
